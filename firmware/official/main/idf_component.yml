@@ -1,0 +1,4 @@
+dependencies:
+  francescopace/espectre:
+    registry_url: https://components.espressif.com
+    version: 3.0.0

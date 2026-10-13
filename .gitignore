@@ -1,0 +1,15 @@
+# Secrets: contains the Wi-Fi SSID/password written by menuconfig
+sdkconfig
+sdkconfig.old
+
+# ESP-IDF build output and downloaded components
+build/
+managed_components/
+
+# Recorded sessions and logs
+pc/sessions/
+*.log
+
+# Python
+__pycache__/
+*.pyc

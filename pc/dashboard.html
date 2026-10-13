@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="hu">
+<head>
+<meta charset="utf-8">
+<title>ESPectre Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#10151c; --card:#18202b; --line:#2a3646; --text:#e4eaf2; --dim:#8696aa; --ok:#3ecf8e; --warn:#f5a524; --bad:#f0524f; --acc:#4da3ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.4 system-ui,Segoe UI,sans-serif; }
+  header { display:flex; align-items:center; gap:16px; padding:12px 20px; border-bottom:1px solid var(--line); }
+  header h1 { font-size:18px; margin:0; }
+  header .sub { color:var(--dim); }
+  #summary { margin-left:auto; display:flex; gap:12px; }
+  main { display:grid; grid-template-columns:repeat(auto-fit,minmax(520px,1fr)); gap:16px; padding:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .top { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .top h2 { margin:0; font-size:16px; }
+  .badge { padding:2px 10px; border-radius:12px; font-size:12px; font-weight:600; background:#2a3646; }
+  .ONLINE { background:#14452f; color:var(--ok); }
+  .NOT_READY, .STALE { background:#4a3610; color:var(--warn); }
+  .OFFLINE { background:#4a1a19; color:var(--bad); }
+  .motion { background:#4a1a19; color:var(--bad); }
+  .idle { background:#14452f; color:var(--ok); }
+  .score { margin-left:auto; font-size:22px; font-variant-numeric:tabular-nums; }
+  canvas { width:100%; height:200px; display:block; margin:10px 0; background:#0d1218; border-radius:6px; }
+  .ctl { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .ctl input[type=range] { flex:1; min-width:160px; }
+  .ctl input[type=number] { width:90px; background:#0d1218; color:var(--text); border:1px solid var(--line); border-radius:4px; padding:4px; }
+  button { background:var(--acc); color:#06121f; border:0; border-radius:6px; padding:6px 12px; font-weight:600; cursor:pointer; }
+  button.sec { background:#2a3646; color:var(--text); }
+  button:disabled { opacity:.5; cursor:default; }
+  .grid { display:grid; grid-template-columns:repeat(4,1fr); gap:6px 12px; margin-top:10px; }
+  .grid div span { display:block; color:var(--dim); font-size:11px; text-transform:uppercase; }
+  .events { margin-top:10px; max-height:110px; overflow:auto; border-top:1px solid var(--line); padding-top:6px; font-size:12px; color:var(--dim); }
+  .events b { color:var(--text); font-weight:500; }
+  #msg { color:var(--warn); }
+</style>
+</head>
+<body>
+<header>
+  <h1>ESPectre Dashboard</h1><span class="sub">Wi-Fi CSI mozgásérzékelés</span>
+  <div id="summary"></div>
+</header>
+<main id="nodes"></main>
+<script>
+const WINDOW_S = 60;
+const cards = {};
+const fmt = (v, d = 3) => v == null ? "–" : Number(v).toFixed(d);
+const hhmmss = t => new Date(t * 1000).toLocaleTimeString("hu-HU");
+
+function dur(s) {
+  if (s == null) return "–";
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60);
+  return (h ? h + "ó " : "") + m + "p " + Math.floor(s % 60) + "mp";
+}
+
+function build(n) {
+  const el = document.createElement("section");
+  el.className = "card";
+  el.innerHTML = `
+    <div class="top"><h2></h2><span class="badge st"></span><span class="badge mo"></span><div class="score"></div></div>
+    <canvas></canvas>
+    <div class="ctl">
+      <label>Küszöb</label>
+      <input type="range" min="0" max="1" step="0.005">
+      <input type="number" min="0" max="1" step="0.005">
+      <button class="apply">Beállít</button>
+      <button class="sec recal">Újrakalibrálás</button>
+    </div>
+    <div class="grid"></div>
+    <div class="events"></div>`;
+  const c = { el, dragging: false };
+  const range = el.querySelector("input[type=range]"), num = el.querySelector("input[type=number]");
+  range.oninput = () => { num.value = range.value; c.dragging = true; };
+  num.oninput = () => { range.value = num.value; c.dragging = true; };
+  el.querySelector(".apply").onclick = async () => {
+    await post(n.host, "threshold", { threshold: parseFloat(num.value) });
+    c.dragging = false;
+  };
+  el.querySelector(".recal").onclick = async () => {
+    if (confirm("Újrakalibrálás indul. Tartsd a helyiséget mozdulatlanul kb. 10 másodpercig. Folytatod?"))
+      await post(n.host, "recalibrate", {});
+  };
+  document.getElementById("nodes").appendChild(el);
+  return c;
+}
+
+async function post(host, action, body) {
+  const r = await fetch(`/api/node/${host}/${action}`, { method: "POST", body: JSON.stringify(body) });
+  const msg = document.getElementById("summary");
+  if (!r.ok) alert("Hiba: " + await r.text());
+}
+
+function draw(canvas, n, now) {
+  const dpr = devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const g = canvas.getContext("2d"); g.scale(dpr, dpr);
+  const pts = n.history.filter(p => now - p[0] <= WINDOW_S);
+  const thr = n.threshold || 0;
+  let max = Math.max(thr * 1.6, 0.05);
+  for (const p of pts) max = Math.max(max, p[1] * 1.1);
+  const X = t => (t - (now - WINDOW_S)) / WINDOW_S * w, Y = v => h - 18 - v / max * (h - 26);
+  g.font = "10px sans-serif"; g.fillStyle = "#8696aa"; g.strokeStyle = "#1e2835";
+  for (let i = 0; i <= 4; i++) {
+    const v = max * i / 4, y = Y(v);
+    g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
+    g.fillText(v.toFixed(3), 4, y - 2);
+  }
+  g.fillStyle = "rgba(240,82,79,.18)";
+  for (let i = 1; i < pts.length; i++) if (pts[i][3]) g.fillRect(X(pts[i - 1][0]), 0, X(pts[i][0]) - X(pts[i - 1][0]), h - 18);
+  if (thr) {
+    g.strokeStyle = "#f5a524"; g.setLineDash([6, 4]); g.beginPath(); g.moveTo(0, Y(thr)); g.lineTo(w, Y(thr)); g.stroke(); g.setLineDash([]);
+    g.fillStyle = "#f5a524"; g.fillText("küszöb " + thr.toFixed(3), w - 90, Y(thr) - 3);
+  }
+  g.strokeStyle = "#4da3ff"; g.lineWidth = 1.6; g.beginPath();
+  let prev = null;
+  pts.forEach(p => {
+    const x = X(p[0]), y = Y(p[1]);
+    if (prev == null || p[0] - prev > 2) g.moveTo(x, y); else g.lineTo(x, y);
+    prev = p[0];
+  });
+  g.stroke(); g.lineWidth = 1;
+  g.fillStyle = "#8696aa"; g.fillText("-60 mp", 4, h - 4); g.fillText("most", w - 30, h - 4);
+}
+
+function update(data) {
+  const now = data.now;
+  let online = 0, moving = 0;
+  for (const n of data.nodes) {
+    const c = cards[n.host] || (cards[n.host] = build(n));
+    const el = c.el;
+    if (n.status === "ONLINE") online++;
+    if (n.status === "ONLINE" && n.state === "motion") moving++;
+    el.querySelector("h2").textContent = `${n.name || "node"} · ${n.host}`;
+    const st = el.querySelector(".st"); st.textContent = n.status; st.className = "badge st " + n.status;
+    const mo = el.querySelector(".mo");
+    const live = n.status === "ONLINE" || n.status === "NOT_READY";
+    mo.textContent = !live ? "nincs adat" : n.calibrating ? "kalibrálás…" : n.state === "motion" ? "MOZGÁS" : "nyugalom";
+    mo.className = "badge mo " + (live && !n.calibrating ? n.state : "");
+    el.querySelector(".score").textContent = live ? fmt(n.score, 4) : "–";
+    if (!c.dragging && n.threshold != null && document.activeElement.type !== "number") {
+      el.querySelector("input[type=range]").value = n.threshold;
+      el.querySelector("input[type=number]").value = Number(n.threshold).toFixed(4);
+    }
+    draw(el.querySelector("canvas"), n, now);
+    el.querySelector(".grid").innerHTML = [
+      ["Device ID", n.device_id], ["Firmware", n.firmware], ["Chip", n.chip], ["Detektor", n.detector],
+      ["RSSI", n.rssi == null ? "–" : n.rssi + " dBm"], ["Csatorna", n.channel], ["SSID", n.ssid], ["Uptime", dur(n.uptime_s)],
+      ["Minták", n.samples], ["Utolsó adat", n.age == null ? "–" : n.age + " mp"], ["Újraindulás", n.boots - 1], ["Újracsatlak.", n.reconnects],
+      ["Be/ki találat", `${n.on_hits ?? "–"} / ${n.off_hits ?? "–"}`], ["CSI pps", n.pps], ["Kész", n.ready ? "igen" : "nem"],
+    ].map(([k, v]) => `<div><span>${k}</span>${v ?? "–"}</div>`).join("");
+    el.querySelector(".events").innerHTML = n.events.map(e => `<div>${hhmmss(e.t)} <b>${e.text}</b></div>`).join("") || "<div>Még nincs esemény</div>";
+  }
+  document.getElementById("summary").innerHTML =
+    `<span class="badge ${online === data.nodes.length ? "ONLINE" : "STALE"}">${online}/${data.nodes.length} online</span>` +
+    `<span class="badge ${moving ? "motion" : "idle"}">${moving ? moving + " node mozgást jelez" : "nyugalom"}</span>`;
+}
+
+async function tick() {
+  try { update(await (await fetch("/api/state")).json()); }
+  catch (e) { document.getElementById("summary").textContent = "Nincs kapcsolat a dashboard szerverrel"; }
+}
+tick(); setInterval(tick, 500);
+</script>
+</body>
+</html>
