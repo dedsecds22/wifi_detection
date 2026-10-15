@@ -18,11 +18,13 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "lwip/sockets.h"
 #include "nvs_flash.h"
 
 #define TAG "mesh"
 
-#define MESH_CHANNEL 7
+#define MESH_CHANNEL 7  // used only when no Wi-Fi credentials are compiled in
+#define UDP_PORT 5005
 #define TX_PERIOD_MS 20
 #define REPORT_PERIOD_MS 1000
 #define MAX_PEERS 8
@@ -60,6 +62,9 @@ static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static const uint8_t BCAST[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 static uint8_t s_self[6];
 static volatile uint32_t s_tx_ok, s_tx_fail;
+static volatile bool s_got_ip;
+static int s_sock = -1;
+static struct sockaddr_in s_dest;
 
 static peer_t *find_peer(const uint8_t *mac, bool create) {
     for (int i = 0; i < MAX_PEERS; i++) {
@@ -155,6 +160,23 @@ static void on_csi(void *ctx, wifi_csi_info_t *csi) {
     portEXIT_CRITICAL_ISR(&s_lock);
 }
 
+#ifdef WIFI_SSID
+static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data) {
+    (void)arg; (void)data;
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        s_got_ip = false;
+        esp_wifi_connect();
+    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        s_got_ip = true;
+        uint8_t ch; wifi_second_chan_t sc;
+        esp_wifi_get_channel(&ch, &sc);
+        ESP_LOGI(TAG, "got IP, router channel %d", ch);
+    }
+}
+#endif
+
 static void tx_task(void *arg) {
     (void)arg;
     uint32_t seq = 0;
@@ -174,6 +196,8 @@ static void report_task(void *arg) {
     while (1) {
         vTaskDelayUntil(&last, pdMS_TO_TICKS(REPORT_PERIOD_MS));
         uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        char out[1024];
+        int off = 0;
         for (int i = 0; i < MAX_PEERS; i++) {
             peer_t snap;
             portENTER_CRITICAL(&s_lock);
@@ -200,13 +224,18 @@ static void report_task(void *arg) {
                 tvar /= snap.prev_n;
             }
             double amp = snap.csi_n ? snap.amp_sum / snap.csi_n : 0;
-            printf("L,%02x%02x%02x%02x%02x%02x,%02x%02x%02x%02x%02x%02x,%lu,%lu,%lu,%lu,%lu,%.1f,%.6f,%.6f,%.6f,%.6f,%.3f\n",
+            off += snprintf(out + off, sizeof(out) - off, "L,%02x%02x%02x%02x%02x%02x,%02x%02x%02x%02x%02x%02x,%lu,%lu,%lu,%lu,%lu,%.1f,%.6f,%.6f,%.6f,%.6f,%.3f\n",
                    s_self[0], s_self[1], s_self[2], s_self[3], s_self[4], s_self[5],
                    snap.mac[0], snap.mac[1], snap.mac[2], snap.mac[3], snap.mac[4], snap.mac[5],
                    (unsigned long)now_ms, (unsigned long)snap.esp_now_rx, (unsigned long)snap.csi_n,
                    (unsigned long)snap.csi_len, (unsigned long)snap.lost, rssi, snap.turb_mean, var, diff, tvar, amp);
         }
-        printf("T,%lu,%lu\n", (unsigned long)s_tx_ok, (unsigned long)s_tx_fail);
+        off += snprintf(out + off, sizeof(out) - off, "T,%lu,%lu\n", (unsigned long)s_tx_ok, (unsigned long)s_tx_fail);
+        fputs(out, stdout);
+        if (s_sock >= 0 && s_got_ip) {
+            int r = sendto(s_sock, out, off, 0, (struct sockaddr *)&s_dest, sizeof(s_dest));
+            if (r < 0) ESP_LOGW(TAG, "udp send failed errno=%d", errno);
+        }
         s_tx_ok = s_tx_fail = 0;
     }
 }
@@ -226,10 +255,26 @@ void app_main(void) {
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+#ifdef WIFI_SSID
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_wifi, NULL));
+    wifi_config_t wc = {0};
+    strncpy((char *)wc.sta.ssid, WIFI_SSID, sizeof(wc.sta.ssid) - 1);
+    strncpy((char *)wc.sta.password, WIFI_PASSWORD, sizeof(wc.sta.password) - 1);
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
+    s_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    s_dest.sin_family = AF_INET;
+    s_dest.sin_port = htons(UDP_PORT);
+    inet_pton(AF_INET, PC_IP, &s_dest.sin_addr);
+#endif
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     ESP_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW20));
+#ifndef WIFI_SSID
+#ifndef WIFI_SSID
     ESP_ERROR_CHECK(esp_wifi_set_channel(MESH_CHANNEL, WIFI_SECOND_CHAN_NONE));
+#endif
+#endif
     esp_read_mac(s_self, ESP_MAC_WIFI_STA);
 
     ESP_ERROR_CHECK(esp_now_init());

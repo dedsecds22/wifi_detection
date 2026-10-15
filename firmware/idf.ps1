@@ -12,6 +12,14 @@ $env:ESP_ROM_ELF_DIR = 'C:\Espressif\tools\esp-rom-elfs\20241011'
 $env:PYTHONUTF8 = '1'
 $env:PATH = "$toolchain;C:\Users\PC\.platformio\packages\tool-ninja;C:\Espressif\tools\cmake\4.0.3\bin;$venv\Scripts;$idf\tools;$env:PATH"
 
+# firmware\.env.local (git-ignored): WIFI_SSID, WIFI_PASSWORD, PC_IP -> used by the mesh firmware at build time
+$envFile = Join-Path $PSScriptRoot '.env.local'
+if ($env:FW_PROJECT -eq 'mesh' -and (Test-Path $envFile)) {
+    foreach ($line in Get-Content $envFile) {
+        if ($line -match '^\s*(WIFI_SSID|WIFI_PASSWORD|PC_IP)\s*=\s*(.*?)\s*$') { Set-Item "env:MESH_$($Matches[1])" $Matches[2] }
+    }
+}
+
 Push-Location (Join-Path $PSScriptRoot $(if ($env:FW_PROJECT) { $env:FW_PROJECT } else { 'official' }))
 try {
     & "$venv\Scripts\python.exe" "$idf\tools\idf.py" @args

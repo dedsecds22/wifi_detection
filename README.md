@@ -120,6 +120,17 @@ Első eredmények (2 node, kb. 1 m távolság):
 - a mozgásra legjobban a normált amplitúdók térbeli szórásának átlaga (`turb_mean`) reagál, mindkét irányban azonos előjellel (kb. +9%)
 - a többi jellemző ilyen közelségben gyenge. Pontos értékeléshez nagyobb távolság (2–3 m) és a vonalon áthaladó személy kell
 
+### LAN-os jelentés (UDP)
+
+Ha a `firmware\.env.local` fájlban szerepel `WIFI_SSID`, `WIFI_PASSWORD` és `PC_IP` (a fájl git-ignorált), a build ezeket beégeti, a node-ok csatlakoznak a routerhez (a mesh mérés a router csatornáján fut), és másodpercenként UDP-n küldik a `L,`/`T,` sorokat a PC 5005-ös portjára. Ha a fájl hiányzik, a node-ok a fix 7-es csatornán, router nélkül mérnek, és csak a soros portra írnak.
+
+```powershell
+$env:FW_PROJECT='mesh'; .\firmware\idf.ps1 build; .\firmware\idf.ps1 -p COM6 flash
+cd pc; python mesh_udp_collector.py --csv mesh.csv
+```
+
+A Windows tűzfalban engedélyezni kell a bejövő UDP 5005-öt (rendszergazdai `New-NetFirewallRule -DisplayName mesh-csi-udp-5005 -Direction Inbound -Protocol UDP -LocalPort 5005 -Action Allow`).
+
 ## Ismert korlátok
 
 - A node-ok API-ja hitelesítés nélküli, ezért csak megbízható helyi hálózaton használható.

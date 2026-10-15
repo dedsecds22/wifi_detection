@@ -14,3 +14,10 @@ pc/*.csv
 # Python
 __pycache__/
 *.pyc
+
+.vscode/*
+.vscode/settings.json
+
+.env.local
+firmware/.env
+
