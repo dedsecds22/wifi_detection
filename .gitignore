@@ -8,6 +8,7 @@ managed_components/
 
 # Recorded sessions and logs
 pc/sessions/
+pc/*.csv
 *.log
 
 # Python

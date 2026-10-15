@@ -11,7 +11,8 @@ A hosszú távú terv a [docs/ESPECTRE_MULTINODE_CSI_MAPPING_SPEC.md](docs/ESPEC
 | P0 | Hivatalos ESPectre firmware egy eszközön | kész |
 | P1 | Egy node + PC-s telemetria, naplózás | kész |
 | P2 | Két node egyszerre, élő dashboard | kész (a kiesés-teszt még nincs lefuttatva) |
-| P3+ | Közös idővonal (ablakok), kalibrációs felvétel, zónatérkép | tervezett |
+| P3a | ESP-NOW mesh CSI-mérés két node között (`firmware/mesh`) | működik, jellemzők hangolása folyik |
+| P3b+ | Topológiaszerkesztő, hőtérkép, TDMA-kör 6 node-ra, közös idővonal, zónatérkép | tervezett |
 
 ## Felépítés
 
@@ -95,6 +96,29 @@ Minden futás egy `pc/sessions/<időbélyeg>/` mappát hoz létre `telemetry.csv
 - A `boot_id` és a `sequence` a PC-n képződik, mert az ESPectre API nem ad ilyet. Ha a node órája visszalép, új `boot_id` jön létre.
 - Ha egy node 3 másodpercig nem küld adatot, STALE lesz, 10 másodperc után OFFLINE. A hiányzó adat sosem számít nulla mozgásnak.
 - A kapcsolat megszakadásakor a gyűjtő automatikusan újracsatlakozik.
+
+## Mesh CSI kísérlet (P3a)
+
+A cél, hogy a node-ok ne csak a routerrel, hanem egymással is mérjenek (6 node = 15 link). A [firmware/mesh](firmware/mesh) önálló ESP-IDF projekt (nem az ESPectre SDK-t használja):
+
+- minden node 50 Hz-en ESP-NOW broadcast keretet küld, HT20 MCS0 adatrátán (legacy 11b kerethez az S3 nem ad használható CSI-t)
+- minden vevő node a keret adójára (MAC) kapja a CSI-t, így node-páronként külön linket mér
+- a csatorna rögzített (7), a node-ok nem csatlakoznak routerhez
+- másodpercenként soros porton `L,` sorok jelennek meg linkenként: keretszám, CSI-szám, RSSI és jellemzők
+
+Build/flash: `$env:FW_PROJECT='mesh'; .\firmware\idf.ps1 build` majd `-p COM6 flash` (a `FW_PROJECT` választja ki a projektet, alapértelmezés `official`).
+
+PC-s eszközök a `pc/` mappában:
+
+- `mesh_serial_probe.py COM6 COM10 --seconds 20`: soros olvasás és linkenkénti összegzés
+- `mesh_phase_test.py COM6 COM10`: 20 s mozdulatlan / 20 s mozgás / 20 s mozdulatlan felvétel hangjelzéssel, a jellemzők rangsorolásával
+
+Első eredmények (2 node, kb. 1 m távolság):
+
+- linkenként és irányonként kb. 47 keret/s érkezik (50 volt a cél), mindegyikhez van CSI (64 alvivő)
+- a keretvesztés kb. 3/s (6%)
+- a mozgásra legjobban a normált amplitúdók térbeli szórásának átlaga (`turb_mean`) reagál, mindkét irányban azonos előjellel (kb. +9%)
+- a többi jellemző ilyen közelségben gyenge. Pontos értékeléshez nagyobb távolság (2–3 m) és a vonalon áthaladó személy kell
 
 ## Ismert korlátok
 

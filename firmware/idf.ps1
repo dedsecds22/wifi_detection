@@ -12,7 +12,7 @@ $env:ESP_ROM_ELF_DIR = 'C:\Espressif\tools\esp-rom-elfs\20241011'
 $env:PYTHONUTF8 = '1'
 $env:PATH = "$toolchain;C:\Users\PC\.platformio\packages\tool-ninja;C:\Espressif\tools\cmake\4.0.3\bin;$venv\Scripts;$idf\tools;$env:PATH"
 
-Push-Location (Join-Path $PSScriptRoot 'official')
+Push-Location (Join-Path $PSScriptRoot $(if ($env:FW_PROJECT) { $env:FW_PROJECT } else { 'official' }))
 try {
     & "$venv\Scripts\python.exe" "$idf\tools\idf.py" @args
     exit $LASTEXITCODE
