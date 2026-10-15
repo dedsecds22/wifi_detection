@@ -20,4 +20,5 @@ __pycache__/
 
 .env.local
 firmware/.env
-
+pc/topology.json
+pc/topology_sim.json

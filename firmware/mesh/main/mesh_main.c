@@ -25,8 +25,9 @@
 
 #define MESH_CHANNEL 7  // used only when no Wi-Fi credentials are compiled in
 #define UDP_PORT 5005
-#define TX_PERIOD_MS 20
-#define REPORT_PERIOD_MS 1000
+#define TX_PERIOD_MS 30
+#define REPORT_PERIOD_MS 500
+#define TDMA_SLOTS 6
 #define MAX_PEERS 8
 #define MAX_SUBC 192
 #define MAGIC 0x4D43u
@@ -177,16 +178,37 @@ static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data) {
 }
 #endif
 
+// Slot index = rank of our MAC among all nodes heard so far. The AP-synchronised TSF clock gives every node
+// the same time base in router mode, so nodes transmit in separate slots of the period (plus small jitter).
+static int my_slot(void) {
+    int rank = 0;
+    portENTER_CRITICAL(&s_lock);
+    for (int i = 0; i < MAX_PEERS; i++) {
+        if (s_peers[i].used && memcmp(s_peers[i].mac, s_self, 6) < 0) rank++;
+    }
+    portEXIT_CRITICAL(&s_lock);
+    return rank % TDMA_SLOTS;
+}
+
 static void tx_task(void *arg) {
     (void)arg;
     uint32_t seq = 0;
-    // Offset the nodes inside the period to avoid constant collisions.
-    vTaskDelay(pdMS_TO_TICKS((s_self[5] % 4) * (TX_PERIOD_MS / 4)));
-    TickType_t last = xTaskGetTickCount();
+    const int64_t period_us = TX_PERIOD_MS * 1000;
+    const int64_t slot_us = period_us / TDMA_SLOTS;
     while (1) {
+        int64_t target = my_slot() * slot_us + (int64_t)(esp_random() % (slot_us / 3));
+        int64_t phase = 0;
+        if (s_got_ip) {
+            int64_t tsf = esp_wifi_get_tsf_time(WIFI_IF_STA);
+            phase = tsf % period_us;
+        } else {
+            phase = (esp_timer_get_time() + (int64_t)s_self[5] * 1000) % period_us;
+        }
+        int64_t wait_us = (target - phase + period_us) % period_us;
+        vTaskDelay(pdMS_TO_TICKS(wait_us / 1000) + 1);
         mesh_frame_t f = {.magic = MAGIC, .seq = seq++, .tx_ms = (uint32_t)(esp_timer_get_time() / 1000)};
         esp_now_send(BCAST, (const uint8_t *)&f, sizeof(f));
-        vTaskDelayUntil(&last, pdMS_TO_TICKS(TX_PERIOD_MS));
+        vTaskDelay(pdMS_TO_TICKS(TX_PERIOD_MS / 2));
     }
 }
 

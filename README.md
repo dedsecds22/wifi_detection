@@ -12,7 +12,9 @@ A hosszú távú terv a [docs/ESPECTRE_MULTINODE_CSI_MAPPING_SPEC.md](docs/ESPEC
 | P1 | Egy node + PC-s telemetria, naplózás | kész |
 | P2 | Két node egyszerre, élő dashboard | kész (a kiesés-teszt még nincs lefuttatva) |
 | P3a | ESP-NOW mesh CSI-mérés két node között (`firmware/mesh`) | működik, jellemzők hangolása folyik |
-| P3b+ | Topológiaszerkesztő, hőtérkép, TDMA-kör 6 node-ra, közös idővonal, zónatérkép | tervezett |
+| P3b | PC-s app: drag-and-drop topológia, RTI hőtérkép, többszemélyes követés, szimulátor (`pc/mesh_app.py`) | kész (szimulátorral tesztelve) |
+| P3c | 6 node-os firmware: TSF-alapú időrések, LAN-os UDP jelentés | megírva, kétnode-szinten tesztelve; 6 node-dal még nem |
+| P4+ | Valós kalibráció 6 node-dal, router nélküli mód (sink node + USB soros), zónatérkép | tervezett |
 
 ## Felépítés
 
@@ -130,6 +132,26 @@ cd pc; python mesh_udp_collector.py --csv mesh.csv
 ```
 
 A Windows tűzfalban engedélyezni kell a bejövő UDP 5005-öt (rendszergazdai `New-NetFirewallRule -DisplayName mesh-csi-udp-5005 -Direction Inbound -Protocol UDP -LocalPort 5005 -Action Allow`).
+
+## Mesh lokalizáló app (P3b/P3c)
+
+```powershell
+cd pc
+python mesh_app.py --sim      # hardver nélkül: 6 virtuális node, szimulált emberek
+python mesh_app.py            # élő: a node-ok UDP-n küldenek az 5005-ös portra
+# böngésző: http://127.0.0.1:8081
+python test_mesh_sim.py 2 200 # fej nélküli teszt: lokalizációs hiba a szimulált valósághoz képest
+```
+
+Működés:
+
+- **Firmware (6 node):** minden node 33 Hz-en ESP-NOW broadcastot küld HT20 MCS0-n, a többiek CSI-t mérnek rá (node-onként 5 link, összesen 15 link, mindkét irányban). Az időrések az AP-hoz szinkronizált TSF-órán alapulnak: a node a MAC-címe sorrendje szerinti saját rését használja (30 ms / 6 rés, kis jitterrel). A jelentés 0,5 másodpercenként megy UDP-n a PC-nek (`PC_IP` a `firmware\.env.local`-ból).
+- **Link-pontszám:** linkenként a CSI `tvar` (időbeli variancia), `diff` és RSSI jellemzőiből z-score készül a saját üres-szoba alapvonalhoz képest. Az app indulásakor 15 s kalibráció fut (üres szoba kell), utána az alapvonal lassan adaptálódik. Újrakalibrálás gombbal.
+- **Lokalizáció:** ellipszis-modellű radiotomográfiai visszavetítés (RTI) 10 cm-es rácson, CLEAN-szerű csúcskeresés (a megtalált csúcs hatását kivonja, így kevesebb a szellemkép), majd alfa-béta követő azonosítóval és nyomvonallal.
+- **Topológia:** a node-okat húzással lehet mozgatni (méterben), a név és a MAC hozzárendelés a jobb oldali táblában szerkeszthető. Alapértelmezés 2×3-as téglalap (3 oszlop × 2 sor, 2 m × 3 m osztással). Mentés: `pc/topology.json` (live) / `pc/topology_sim.json` (szimuláció), mindkettő git-ignorált. Az ismeretlen MAC-ek az első adat sorrendjében kapnak helyet.
+- **Szimulátor:** ugyanabban a szöveges formátumban generál adatot, mint a firmware, ezért a teljes PC-s láncot teszteli. A mozgó emberek árnyékolják a linkeket (zajjal). A szimulált emberek mindig mozognak. A node húzása a szimulátorban a valós elrendezés megváltoztatását jelenti, ilyenkor érdemes újrakalibrálni.
+
+Szimulátoron mért pontosság (4 m × 3 m, 6 node, 1–3 mozgó személy): medián hiba ~0,5–0,65 m, a személyszám a mérések 50–85%-ában helyes. **Ez csak a szimulátor modelljére igaz**, valós hardveren a kalibrációt és a küszöböket 6 node-dal újra kell hangolni.
 
 ## Ismert korlátok
 

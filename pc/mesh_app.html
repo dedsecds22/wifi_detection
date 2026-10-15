@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+<meta charset="utf-8">
+<title>Mesh mozgáslokalizáció</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; font: 14px system-ui, sans-serif; background: #12151a; color: #dde3ea; display: flex; height: 100vh; }
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #bar { padding: 8px 12px; background: #1b2028; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+  #bar .badge { padding: 2px 8px; border-radius: 10px; background: #2b3340; }
+  #bar .cal { background: #8a6d00; }
+  canvas { flex: 1; width: 100%; min-height: 0; cursor: default; }
+  #side { width: 330px; background: #1b2028; overflow-y: auto; padding: 10px; box-sizing: border-box; }
+  h3 { margin: 12px 0 6px; font-size: 13px; text-transform: uppercase; color: #8fa1b8; }
+  button, select, input[type=text] { background: #2b3340; color: #dde3ea; border: 1px solid #3a4556; border-radius: 4px; padding: 4px 8px; }
+  button { cursor: pointer; } button:hover { background: #38445a; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  td { padding: 2px 3px; }
+  input[type=text] { width: 80px; }
+  select { width: 118px; font-size: 11px; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #666; }
+  .dot.on { background: #3ddc84; }
+  label { display: block; margin: 3px 0; }
+  .hint { color: #8fa1b8; font-size: 12px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<div id="main">
+  <div id="bar">
+    <span id="mode" class="badge">…</span>
+    <span id="cal" class="badge cal" style="display:none"></span>
+    <span id="count"></span>
+  </div>
+  <canvas id="cv"></canvas>
+</div>
+<div id="side">
+  <h3>Vezérlés</h3>
+  <button id="btnCal">Kalibrálás (üres szoba)</button>
+  <button id="btnGrid">2×3 rács visszaállítása</button>
+  <label><input type="checkbox" id="chHeat" checked> Hőtérkép</label>
+  <label><input type="checkbox" id="chLinks" checked> Linkek</label>
+  <label><input type="checkbox" id="chTruth" checked> Szimulált valós pozíció</label>
+  <div id="simCtl" style="display:none">Szimulált személyek:
+    <select id="simN" style="width:60px"><option>0</option><option>1</option><option selected>2</option><option>3</option><option>4</option></select>
+  </div>
+  <h3>Node-ok (húzd a pontokat a térképen)</h3>
+  <table id="nodes"></table>
+  <h3>Személyek</h3>
+  <div id="people">–</div>
+  <div class="hint">A kalibráció alatt ne legyen mozgás a térben. A mozdulatlan személy nem látszik (a CSI a mozgást érzékeli). Koordináták méterben, a rács bal alsó node-ja az origó.</div>
+</div>
+<script>
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+let S = null, view = null, drag = null, heatCv = document.createElement('canvas');
+const COLORS = ['#ff5252','#40c4ff','#ffd740','#69f0ae','#e040fb','#ff9100'];
+
+function post(path, body) { return fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body || {})}); }
+
+function fitView() {
+  if (!S) return;
+  const xs = S.nodes.map(n => n.x), ys = S.nodes.map(n => n.y), m = 1.0;
+  view = {x0: Math.min(...xs) - m, x1: Math.max(...xs) + m, y0: Math.min(...ys) - m, y1: Math.max(...ys) + m};
+}
+function scale() {
+  const w = cv.width, h = cv.height, vw = view.x1 - view.x0, vh = view.y1 - view.y0;
+  const k = Math.min(w / vw, h / vh);
+  return {k, ox: (w - vw * k) / 2, oy: (h - vh * k) / 2};
+}
+function toScreen(x, y) { const s = scale(); return [s.ox + (x - view.x0) * s.k, cv.height - (s.oy + (y - view.y0) * s.k)]; }
+function toWorld(px, py) { const s = scale(); return [view.x0 + (px - s.ox) / s.k, view.y0 + (cv.height - py - s.oy) / s.k]; }
+
+function resize() { cv.width = cv.clientWidth; cv.height = cv.clientHeight; draw(); }
+window.addEventListener('resize', resize);
+
+function heatColor(v) { // 0..255 -> rgba
+  const t = v / 255; if (t < 0.03) return [0, 0, 0, 0];
+  return [255, Math.round(200 * (1 - t)), 30, Math.round(40 + 190 * Math.min(1, t * 1.5))];
+}
+function drawHeat() {
+  const H = S.heat; if (!H.w) return;
+  heatCv.width = H.w; heatCv.height = H.h;
+  const hc = heatCv.getContext('2d'), img = hc.createImageData(H.w, H.h);
+  for (let iy = 0; iy < H.h; iy++) for (let ix = 0; ix < H.w; ix++) {
+    const c = heatColor(H.data[iy * H.w + ix]), o = ((H.h - 1 - iy) * H.w + ix) * 4;
+    img.data[o] = c[0]; img.data[o + 1] = c[1]; img.data[o + 2] = c[2]; img.data[o + 3] = c[3];
+  }
+  hc.putImageData(img, 0, 0);
+  const [sx0, sy0] = toScreen(H.x0 - H.res / 2, H.y0 + (H.h - 1) * H.res + H.res / 2);
+  const [sx1, sy1] = toScreen(H.x0 + (H.w - 1) * H.res + H.res / 2, H.y0 - H.res / 2);
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(heatCv, sx0, sy0, sx1 - sx0, sy1 - sy0);
+}
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  if (!S || !view) return;
+  // grid
+  ctx.strokeStyle = '#222a35'; ctx.lineWidth = 1; ctx.fillStyle = '#4a586b'; ctx.font = '11px sans-serif';
+  for (let x = Math.ceil(view.x0); x <= view.x1; x++) { const [a, b] = toScreen(x, view.y0), [c, d] = toScreen(x, view.y1);
+    ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(c, d); ctx.stroke(); ctx.fillText(x + ' m', a + 2, b - 3); }
+  for (let y = Math.ceil(view.y0); y <= view.y1; y++) { const [a, b] = toScreen(view.x0, y), [c, d] = toScreen(view.x1, y);
+    ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(c, d); ctx.stroke(); ctx.fillText(y + ' m', a + 2, b - 3); }
+  if (document.getElementById('chHeat').checked) drawHeat();
+  const byId = Object.fromEntries(S.nodes.map(n => [n.id, n]));
+  if (document.getElementById('chLinks').checked) for (const l of S.links) {
+    const a = byId[l.a], b = byId[l.b], [x1, y1] = toScreen(a.x, a.y), [x2, y2] = toScreen(b.x, b.y);
+    const s = l.score;
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+    if (s === null) { ctx.strokeStyle = '#333'; ctx.setLineDash([4, 6]); ctx.lineWidth = 1; }
+    else { ctx.setLineDash([]); ctx.strokeStyle = s > 0.2 ? `rgba(255,${Math.round(200 - 30 * Math.min(s, 6))},40,${0.4 + 0.1 * Math.min(s, 6)})` : '#2f5d43'; ctx.lineWidth = 1 + Math.min(s, 6); }
+    ctx.stroke(); ctx.setLineDash([]);
+  }
+  if (S.truth && document.getElementById('chTruth').checked) for (const t of S.truth) {
+    const [x, y] = toScreen(t.x, t.y); ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(x, y, 9, 0, 6.3); ctx.stroke();
+  }
+  for (const p of S.people) {
+    const col = COLORS[(p.id - 1) % COLORS.length];
+    ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.beginPath();
+    p.trail.forEach(([x, y], i) => { const [sx, sy] = toScreen(x, y); i ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); }); ctx.stroke();
+    const [x, y] = toScreen(p.x, p.y);
+    ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x, y, 7, 0, 6.3); ctx.fill();
+    ctx.fillStyle = '#000'; ctx.font = 'bold 10px sans-serif'; ctx.fillText(p.id, x - 3, y + 4);
+  }
+  for (const n of S.nodes) {
+    const [x, y] = toScreen(n.x, n.y);
+    ctx.fillStyle = n.fresh ? '#3ddc84' : '#666'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+    ctx.fillRect(x - 8, y - 8, 16, 16); ctx.strokeRect(x - 8, y - 8, 16, 16);
+    ctx.fillStyle = '#fff'; ctx.font = '12px sans-serif'; ctx.fillText(n.name, x + 12, y - 8);
+  }
+}
+
+cv.addEventListener('mousedown', e => {
+  if (!S) return; const r = cv.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
+  for (const n of S.nodes) { const [x, y] = toScreen(n.x, n.y); if (Math.abs(px - x) < 12 && Math.abs(py - y) < 12) { drag = n; break; } }
+});
+window.addEventListener('mousemove', e => {
+  const r = cv.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
+  if (drag) { let [x, y] = toWorld(px, py); drag.x = Math.round(x * 20) / 20; drag.y = Math.round(y * 20) / 20; draw(); renderNodes(); }
+  else if (S) cv.style.cursor = S.nodes.some(n => { const [x, y] = toScreen(n.x, n.y); return Math.abs(px - x) < 12 && Math.abs(py - y) < 12; }) ? 'grab' : 'default';
+});
+window.addEventListener('mouseup', async () => {
+  if (!drag) return; const n = drag; drag = null;
+  await post('/api/topology', {nodes: [{id: n.id, x: n.x, y: n.y}]}); fitView();
+});
+
+function renderNodes() {
+  if (!S || document.activeElement && document.activeElement.closest('#nodes')) return;
+  const t = document.getElementById('nodes');
+  t.innerHTML = S.nodes.map(n => `<tr><td><span class="dot ${n.fresh ? 'on' : ''}"></span></td>
+    <td><input type="text" data-id="${n.id}" data-f="name" value="${n.name}"></td>
+    <td><select data-id="${n.id}" data-f="mac"><option value="">(nincs)</option>${S.known_macs.map(m => `<option ${m === n.mac ? 'selected' : ''}>${m}</option>`).join('')}</select></td>
+    <td>${n.x.toFixed(2)},${n.y.toFixed(2)}</td></tr>`).join('');
+}
+document.getElementById('nodes').addEventListener('change', e => {
+  const el = e.target, it = {id: el.dataset.id}; it[el.dataset.f] = el.value; post('/api/topology', {nodes: [it]});
+});
+
+function update() {
+  const live = S.mode === 'live';
+  document.getElementById('mode').textContent = live ? 'Élő (UDP)' : 'Szimuláció';
+  const cal = document.getElementById('cal');
+  cal.style.display = S.calibrating ? '' : 'none'; cal.textContent = `Kalibrálás… ${S.cal_left.toFixed(0)} s`;
+  const fresh = S.nodes.filter(n => n.fresh).length;
+  document.getElementById('count').textContent = `${fresh}/${S.nodes.length} node aktív · ${S.people.length} személy`;
+  document.getElementById('simCtl').style.display = live ? 'none' : '';
+  document.getElementById('chTruth').parentElement.style.display = live ? 'none' : '';
+  document.getElementById('people').innerHTML = S.people.length ? S.people.map(p =>
+    `<div><span style="color:${COLORS[(p.id - 1) % COLORS.length]}">●</span> #${p.id}: (${p.x.toFixed(2)}, ${p.y.toFixed(2)}) m, ${Math.hypot(p.vx, p.vy).toFixed(1)} m/s</div>`).join('') : '–';
+  if (!drag) renderNodes();
+}
+
+document.getElementById('btnCal').onclick = () => post('/api/calibrate');
+document.getElementById('btnGrid').onclick = async () => { await post('/api/grid', {cols: 3, rows: 2, dx: 2.0, dy: 3.0}); setTimeout(fitView, 700); };
+document.getElementById('simN').onchange = e => post('/api/sim', {people: +e.target.value});
+for (const id of ['chHeat', 'chLinks', 'chTruth']) document.getElementById(id).onchange = draw;
+
+const es = new EventSource('/events');
+es.onmessage = ev => {
+  const first = !S; const st = JSON.parse(ev.data);
+  if (drag) { st.nodes.forEach(n => { if (n.id === drag.id) { n.x = drag.x; n.y = drag.y; } }); }
+  S = st; if (first) { fitView(); document.getElementById('simN').value = S.sim_people ?? 2; }
+  update(); draw();
+};
+resize();
+</script>
+</body>
+</html>
